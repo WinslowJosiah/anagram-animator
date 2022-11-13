@@ -1163,9 +1163,9 @@ class Game:
         """
         os.system(
             f"ffmpeg -y -framerate {self.FPS} "
-            f"-i {os.path.join(self.FRAMES, '%06d.png')} "
+            f"-i \"{os.path.join(self.FRAMES, '%06d.png')}\" "
             f"-c:v libx264 -pix_fmt yuv420p "
-            f"{os.path.join(self.VIDEOS, filename)}_{self.keyframe - 1}.mp4"
+            f"\"{os.path.join(self.VIDEOS, filename)}_{self.keyframe - 1}.mp4\""
         )
 
     def save_frame(self):
