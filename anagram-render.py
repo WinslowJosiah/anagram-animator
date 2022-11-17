@@ -21,12 +21,17 @@ import os
 import shutil
 import textwrap
 from typing import (
-    Any, Callable, Generator, Literal, NamedTuple, Optional, Sequence
+    Any, Callable, Generator, get_args, Literal, NamedTuple, Optional, Sequence
 )
 
 
 # Text alignment
 Alignment = Literal["L", "R", "C"]
+
+
+# Modes for rendering video
+RenderModeID = Literal["kf_vid", "vid", "vid_loop"]
+KEYFRAME_VIDEO, SINGLE_VIDEO, LOOPED_VIDEO = get_args(RenderModeID)
 
 
 # GUI value with label
@@ -42,6 +47,12 @@ class Dimension(NamedTuple):
     name: Optional[str]
     width: int
     height: int
+
+
+# Rendering mode
+class RenderMode(NamedTuple):
+    label: str
+    id: RenderModeID
 
 
 # Type hints from Pygame (I could not figure out how to import them)
@@ -304,6 +315,7 @@ def word_wrap_text(
         while font.size(text[:i])[0] < _rect.width and i < len(text):
             i += 1
 
+        j = i
         # If we're not past the end of the line
         if i < len(text):
             # Find end of last word
@@ -311,6 +323,8 @@ def word_wrap_text(
             # Adjust wrap to end of last word if found
             if j > 0:
                 i = j
+            else:
+                j = i
 
         # Render the line
         if bg_color:
@@ -333,7 +347,7 @@ def word_wrap_text(
         surface.blit(image, (x, y))
         y += font_height + LINE_SPACING
 
-        text = text[i + 1:]
+        text = text[j:]
 
     return text, y
 
@@ -548,14 +562,20 @@ class Game:
     TILE_GAP_TO_TILE_SIDE = 1 / 15
     TILE_SPACE_TO_TILE_SIDE = 1 / 2
 
-    OPTIONS_WIDTH_PROPORTION = 0.9
-    LABELS_WIDTH_PROPORTION = 0.7
+    OPTIONS_WIDTH_PROPORTION = 1.0
+    LABELS_WIDTH_PROPORTION = 0.6
 
     DIMENSIONS = [
         Dimension("1:1", 1080, 1080),
         Dimension("9:16", 1080, 1920),
         Dimension("16:9", 1920, 1080),
     ]
+
+    RENDER_NAME_FORMATS: dict[RenderModeID, str] = {
+        KEYFRAME_VIDEO: "{hash}_{kf}",
+        SINGLE_VIDEO: "{hash}_full",
+        LOOPED_VIDEO: "{hash}_loop",
+    }
 
     def __init__(self, anagrams: list[list[str]]):
         """
@@ -569,6 +589,12 @@ class Game:
         """
         pygame.init()
 
+        self.RENDER_MODES = [
+            RenderMode("Keyframes + videos", KEYFRAME_VIDEO),
+            RenderMode("Single video (start to end)", SINGLE_VIDEO),
+            RenderMode("Single video (loop)", LOOPED_VIDEO),
+        ]
+
         # Listed options and properties
         # (this isn't really the best way to do this)
         self.OPTIONS: list[LabelledValue] = [
@@ -578,22 +604,34 @@ class Game:
             LabelledValue("len", "Animation length (seconds)", lambda: (
                 self.anim_length
             )),
+            LabelledValue("pau", "Animation pause (seconds)", lambda: (
+                self.anim_pause
+            )),
             LabelledValue("rat", "Aspect ratio", lambda: (
                 self.DIMENSIONS[self.dimension_i].name
+            )),
+            LabelledValue("mod", "Render mode", lambda: (
+                self.RENDER_MODES[self.render_mode_i].label
             )),
         ]
         self.PROPERTIES: list[LabelledValue] = [
             LabelledValue("rdd", "Rendered", lambda: (
                 "Yes"
-                if os.path.isfile(os.path.join(
-                    self.VIDEOS, f"{self.get_phrases_hash()}_0.mp4"
-                ))
+                if any(
+                    os.path.isfile(os.path.join(
+                        self.VIDEOS, fmt.format(
+                            hash=self.get_phrases_hash(),
+                            kf=0
+                        ) + ".mp4"
+                    ))
+                    for fmt in self.RENDER_NAME_FORMATS.values()
+                )
                 else "No"
             )),
             LabelledValue("rdn", "Rendering", lambda: (
                 "Yes" if self.rendering else "No"
             )),
-            LabelledValue("fps", "FPS", lambda: round(self.clock.get_fps(), 3))
+            LabelledValue("fps", "FPS", lambda: round(self.clock.get_fps(), 3)),
         ]
 
         # List of anagrams passed into game
@@ -604,7 +642,9 @@ class Game:
         self.anagrams_i: int = 0
         self.option_i: int = 0
         self.dimension_i: int = 0
+        self.render_mode_i: int = 0
         self.anim_length: float = 2.0
+        self.anim_pause: float = 3.0
         self.side_padding: int = 4
 
         # Set initial window dimensions
@@ -612,7 +652,7 @@ class Game:
 
         # Load font
         self.font_size: int = int(
-            min(self.WINDOW_WIDTH, self.WINDOW_HEIGHT) / 25
+            min(self.WINDOW_WIDTH, self.WINDOW_HEIGHT) / 27
         )
         self.font: Font = create_font(
             ("Segoe UI", "Tahoma", "Lucida Grande", "Arial"),
@@ -762,6 +802,13 @@ class Game:
                 if right_pressed:
                     if self.anim_length < 3:
                         self.anim_length += 0.125
+            case "pau":  # Animation pause (seconds)
+                if left_pressed:
+                    if self.anim_pause > 1:
+                        self.anim_pause -= 0.125
+                if right_pressed:
+                    if self.anim_pause < 10:
+                        self.anim_pause += 0.125
             case "rat":  # Aspect ratio
                 if left_pressed:
                     self.dimension_i -= 1
@@ -772,6 +819,12 @@ class Game:
                     should_init = True
                     should_set_dims = True
                 self.dimension_i %= len(self.DIMENSIONS)
+            case "mod":  # Render mode
+                if left_pressed:
+                    self.render_mode_i -= 1
+                if right_pressed:
+                    self.render_mode_i += 1
+                self.render_mode_i %= len(self.RENDER_MODES)
             case _:  # just in case
                 pass
 
@@ -799,7 +852,9 @@ class Game:
 
         # RETURN to render
         if K_RETURN in self.keys_pressed:
-            self.update_iter = iter(self.functional_render())
+            self.update_iter = iter(self.functional_render(
+                self.RENDER_MODES[self.render_mode_i].id
+            ))
 
         return should_return
 
@@ -835,13 +890,13 @@ class Game:
             labels_plus_values_width * self.LABELS_WIDTH_PROPORTION
         )
         values_width = int(labels_plus_values_width - labels_width)
-        max_label_height = (font_height + LINE_SPACING) * 3
+        max_label_height = (font_height + LINE_SPACING) * 3 - LINE_SPACING
 
         x, y = padding, padding
         # Loop through each option
         for i, option in enumerate(self.OPTIONS):
             # Display the option's label
-            _, ty = word_wrap_text(
+            _, lty = word_wrap_text(
                 self.options_surface,
                 option.label,
                 WHITE if i == self.option_i else GRAY,
@@ -857,18 +912,19 @@ class Game:
                 value_str = str(option.value)
 
             # Display the option's value
-            word_wrap_text(
+            _, vty = word_wrap_text(
                 self.options_surface,
                 value_str,
                 WHITE,
                 (
                     x + labels_width + padding, y,
-                    values_width, ty - y - LINE_SPACING
+                    values_width, max_label_height
                 ),
                 self.font, True, align="C"
             )
 
-            x, y = x, ty
+            # x, y = x, ty
+            x, y = x, max(lty, vty)
 
         x, y = x, y + font_height + LINE_SPACING
         # Loop through each property
@@ -956,15 +1012,18 @@ class Game:
         # Advance to the next phrase
         self.texts_i = (self.texts_i + 1) % len(self.get_phraselist())
 
-    def functional_render(self) -> Generator[Any, None, None]:
+    def functional_render(self, mode: RenderModeID) -> Generator[Any, None, None]:
         # Create hash from phrases in anagram
         phrases_hash = self.get_phrases_hash()
+
+        # Get name of rendered video file
+        video_name_format = self.RENDER_NAME_FORMATS[mode]
 
         # Set up animation
         self.setup_animation()
 
-        # Create keyframes and videos directories
-        if not os.path.isdir(self.KEYFRAMES):
+        # Create videos (and maybe keyframes) directory
+        if mode == KEYFRAME_VIDEO and not os.path.isdir(self.KEYFRAMES):
             os.mkdir(self.KEYFRAMES)
         if not os.path.isdir(self.VIDEOS):
             os.mkdir(self.VIDEOS)
@@ -974,16 +1033,33 @@ class Game:
         self.keyframe = 0
         self.rendering = True
 
-        for i in range(len(self.get_phraselist()) - 1):
+        # Set the number of phrases to animate
+        number_of_phrases = len(self.get_phraselist())
+        if mode in (KEYFRAME_VIDEO, SINGLE_VIDEO):
+            number_of_phrases -= 1
+
+        # Main animation loop
+        for i in range(number_of_phrases):
             # Create tiles for this phrase
             self.tiles = self.phrase_to_tiles(
                 self.get_nth_phrase(i)
             )
 
-            # Save the pre-animation keyframe
-            self.render_tiles()
-            yield False
-            self.save_keyframe(phrases_hash)
+            # If rendering keyframe video
+            if mode == KEYFRAME_VIDEO:
+                # Save the pre-animation keyframe
+                self.render_tiles()
+                self.save_keyframe(f"{phrases_hash}_{self.keyframe}")
+                self.keyframe += 1
+                yield False
+            # If rendering single or looped video
+            elif mode in (SINGLE_VIDEO, LOOPED_VIDEO):
+                # Pause for the specified length of time
+                self.render_tiles()
+                for _ in range(int(self.anim_pause * self.FPS)):
+                    self.save_frame()
+                    self.frame += 1
+                    yield False
 
             # Animate the tiles to their destinations
             self.set_tile_anims(self.anim_length, i)
@@ -1001,12 +1077,39 @@ class Game:
                 last_tile = self.tiles[-1]
                 self.animating = last_tile.following_path
 
-            # Render this video, and set up again
-            self.render_video(phrases_hash)
-            self.setup_render()
+            # The tiles have been animated to their destinations
+            # If rendering keyframe video
+            if mode == KEYFRAME_VIDEO:
+                # Render this video, and set up again
+                self.render_video(video_name_format.format(
+                    hash=phrases_hash,
+                    kf=self.keyframe - 1,
+                ))
+                self.setup_render()
 
-        # Save the post-animation keyframe
-        self.save_keyframe(phrases_hash)
+        # The main animation loop is done
+        # If rendering single video
+        if mode == SINGLE_VIDEO:
+            # Pause for the specified length of time
+            self.render_tiles()
+            for _ in range(int(self.anim_pause * self.FPS)):
+                self.save_frame()
+                self.frame += 1
+                yield False
+
+        # The main animation loop has ended
+        # If rendering keyframe video
+        if mode == KEYFRAME_VIDEO:
+            # Save the post-animation keyframe
+            self.save_keyframe(f"{phrases_hash}_{self.keyframe}")
+        # If rendering single or looped video
+        elif mode in (SINGLE_VIDEO, LOOPED_VIDEO):
+            # Render this video, and set up again
+            self.render_video(video_name_format.format(
+                hash=phrases_hash,
+                kf=self.keyframe - 1,
+            ))
+            self.setup_render()
 
         # Transition out of render
         self.setup_animation()
@@ -1165,7 +1268,7 @@ class Game:
             f"ffmpeg -y -framerate {self.FPS} "
             f"-i \"{os.path.join(self.FRAMES, '%06d.png')}\" "
             f"-c:v libx264 -pix_fmt yuv420p "
-            f"\"{os.path.join(self.VIDEOS, filename)}_{self.keyframe - 1}.mp4\""
+            f"\"{os.path.join(self.VIDEOS, filename)}.mp4\""
         )
 
     def save_frame(self):
@@ -1188,9 +1291,8 @@ class Game:
         """
         pygame.image.save_extended(
             self.render_surface,
-            os.path.join(self.KEYFRAMES, f"{filename}_{self.keyframe}.png")
+            os.path.join(self.KEYFRAMES, f"{filename}.png")
         )
-        self.keyframe += 1
 
     def set_tile_anims(self, seconds: int | float, i: int):
         """
