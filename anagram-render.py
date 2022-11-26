@@ -313,16 +313,21 @@ def word_wrap_text(
 
         # Determine maximum width of line
         while font.size(text[:i])[0] < _rect.width and i < len(text):
+            if text[i - 1] == "\n":
+                break
             i += 1
 
         j = i
         # If we're not past the end of the line
         if i < len(text):
             # Find end of last word
-            j = text.rfind(" ", 0, i)
+            j = i - 1
+            while not text[j].isspace() and j >= 0:
+                j -= 1
             # Adjust wrap to end of last word if found
             if j > 0:
                 i = j
+                j += 1
             else:
                 j = i
 
